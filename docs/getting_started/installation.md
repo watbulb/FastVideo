@@ -5,6 +5,7 @@ FastVideo supports the following hardware platforms:
 
 - [NVIDIA CUDA](installation/gpu.md)
 - [Apple silicon](installation/mps.md)
+- [Windows](installation/windows.md)
 
 ## Quick Installation
 
@@ -32,6 +33,8 @@ pip install fastvideo
 
 ### From source
 
+#### Linux/macOS
+
 ```bash
 git clone https://github.com/hao-ai-lab/FastVideo.git
 cd FastVideo
@@ -41,11 +44,18 @@ uv pip install -e .
 uv pip install flash-attn --no-build-isolation -v
 ```
 
-Alternative with Conda environment:
+#### Windows
 
-```bash
-pip install -e .
-pip install flash-attn --no-build-isolation -v
+`fastvideo-kernel` is built from source on Windows. See
+[Windows Installation](installation/windows.md) for prerequisites and
+caveats.
+
+```powershell
+git clone https://github.com/hao-ai-lab/FastVideo.git
+cd FastVideo
+uv pip install -e .
+cd fastvideo-kernel
+.\build.ps1
 ```
 
 ## Hardware Requirements
@@ -59,3 +69,9 @@ pip install flash-attn --no-build-isolation -v
 - [Quick Start Guide](quick_start.md) - Get started with your first video generation
 - [Configuration](../inference/configuration.md) - Learn about configuration options
 - [Examples](../inference/examples/examples_inference_index.md) - Explore example scripts and notebooks
+
+## Platform-Specific Guides
+
+- [Windows Installation](installation/windows.md) - Detailed Windows setup with PowerShell
+- [GPU Installation](installation/gpu.md) - Linux/macOS GPU setup
+- [Apple Silicon](installation/mps.md) - macOS MPS setup

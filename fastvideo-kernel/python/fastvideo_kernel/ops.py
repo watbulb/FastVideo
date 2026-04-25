@@ -1,7 +1,6 @@
 import math
 import torch
 from .block_sparse_attn import block_sparse_attn
-from .triton_kernels.st_attn_triton import sliding_tile_attention_triton
 
 # Try to load the C++ extension
 try:
@@ -20,8 +19,10 @@ def sliding_tile_attention(
     has_text: bool = True,
     seq_shape: str = "30x48x80",
 ) -> torch.Tensor:
-    # Check if the specific op is available
     if sta_fwd is None:
+        # Defer the Triton import so a missing triton (e.g. on Windows)
+        # does not break `import fastvideo_kernel` for unrelated callers.
+        from .triton_kernels.st_attn_triton import sliding_tile_attention_triton
         return sliding_tile_attention_triton(
             q, k, v, window_size, text_length, has_text, seq_shape
         )

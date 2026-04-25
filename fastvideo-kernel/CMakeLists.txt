@@ -14,6 +14,15 @@ else()
     find_package(CUDAToolkit REQUIRED)
 endif()
 
+# pytorch/pytorch#173232: Torch's C++20 headers fail on MSVC. ThunderKittens needs C++20 elsewhere.
+if(MSVC)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD 17)
+else()
+    set(CMAKE_CXX_STANDARD 20)
+    set(CMAKE_CUDA_STANDARD 20)
+endif()
+
 # Import common utils if needed, but we keep it simple for now
 
 # Find Python and Torch
@@ -29,6 +38,18 @@ list(APPEND TORCH_INCLUDE_DIRS ${TORCH_INCLUDE_PATHS})
 
 # Find Torch package (still useful for libraries)
 find_package(Torch REQUIRED)
+
+# Torch injects --Werror cross-execution-space-call on Windows, which turns benign
+# host/host_device annotation gaps in cutlass/MSVC-STL into fatal errors.
+if(MSVC)
+    foreach(_var CMAKE_CUDA_FLAGS CMAKE_CUDA_FLAGS_RELEASE CMAKE_CUDA_FLAGS_DEBUG
+                 CMAKE_CUDA_FLAGS_RELWITHDEBINFO CMAKE_CUDA_FLAGS_MINSIZEREL)
+        if(DEFINED ${_var})
+            string(REPLACE "--Werror cross-execution-space-call" "" ${_var} "${${_var}}")
+            string(REPLACE "--no-host-device-move-forward" "" ${_var} "${${_var}}")
+        endif()
+    endforeach()
+endif()
 
 # Include directories
 include_directories(
@@ -94,21 +115,37 @@ endif()
 # Always try to build the extension if CUDA is available, but conditionally add sources/flags
 set(BUILD_CXX_KERNELS ON)
 
-# Compiler flags
+# Portable CUDA compile flags. CXX standard and MSVC-specific host flags are
+# handled separately (see below) instead of being baked into this list.
 set(CUDA_FLAGS
     "-DNDEBUG"
     "-O3"
-    "-std=c++20"
     "--use_fast_math"
     "--expt-extended-lambda"
     "--expt-relaxed-constexpr"
-    "-Xcompiler=-fno-strict-aliasing"
-    "-Xcompiler=-fPIC"
-    "-DTORCH_COMPILE"
     "-Xnvlink=--verbose"
     "-Xptxas=--verbose"
     "-Xptxas=--warn-on-spills"
 )
+
+# POSIX-specific flags (not compatible with MSVC).
+if(NOT MSVC)
+    list(APPEND CUDA_FLAGS
+        "-Xcompiler=-fno-strict-aliasing"
+        "-Xcompiler=-fPIC"
+    )
+endif()
+
+# /bigobj: cutlass TUs are large. /Zc:__cplusplus: Torch needs the real value.
+# /permissive- is intentionally omitted; it triggers C2872 between CCCL's
+# ::cuda:: and c10::cuda in cutlass headers.
+set(MSVC_HOST_FLAGS "/bigobj" "/Zc:__cplusplus" "/EHsc")
+
+if(MSVC)
+    foreach(_flag IN LISTS MSVC_HOST_FLAGS)
+        list(APPEND CUDA_FLAGS "-Xcompiler=${_flag}")
+    endforeach()
+endif()
 
 # If TK is enabled, ensure we target Hopper. This is required even on GPU-less builders (CI).
 if(ENABLE_TK_KERNELS)
@@ -143,10 +180,28 @@ if(BUILD_CXX_KERNELS)
         ${EXTENSION_SOURCES}
     )
 
-    # Build compile definitions list
-    set(COMPILE_DEFS TORCH_EXTENSION_NAME=fastvideo_kernel_ops)
+    # Build compile definitions list.
+    set(COMPILE_DEFS
+        TORCH_EXTENSION_NAME=fastvideo_kernel_ops
+        TORCH_COMPILE
+    )
     if(ENABLE_TK_KERNELS)
         list(APPEND COMPILE_DEFS TK_COMPILE_ST_ATTN TK_COMPILE_BLOCK_SPARSE)
+    endif()
+
+    # Mirror torch.utils.cpp_extension.CUDAExtension defines.
+    list(APPEND COMPILE_DEFS
+        __CUDA_NO_HALF_OPERATORS__
+        __CUDA_NO_HALF_CONVERSIONS__
+        __CUDA_NO_HALF2_OPERATORS__
+        __CUDA_NO_BFLOAT16_CONVERSIONS__
+    )
+
+    # USE_CUDA gates the Windows branch of Torch's compiled_autograd.h.
+    if(GPU_BACKEND STREQUAL "ROCM")
+        list(APPEND COMPILE_DEFS USE_ROCM)
+    else()
+        list(APPEND COMPILE_DEFS USE_CUDA)
     endif()
 
     target_compile_definitions(fastvideo_kernel_ops PRIVATE ${COMPILE_DEFS})
@@ -155,14 +210,21 @@ if(BUILD_CXX_KERNELS)
         $<$<COMPILE_LANGUAGE:CUDA>:${CUDA_FLAGS}>
     )
 
+    # common_extension.cpp needs the same MSVC flags as the .cu hosts.
+    if(MSVC)
+        target_compile_options(fastvideo_kernel_ops PRIVATE
+            $<$<COMPILE_LANGUAGE:CXX>:${MSVC_HOST_FLAGS}>
+        )
+    endif()
+
     # Link against Torch libraries to avoid undefined symbols at import time
     # (e.g., torch::autograd vtables) when loading the extension module.
     target_link_libraries(fastvideo_kernel_ops PRIVATE ${TORCH_LIBRARIES})
 
-    # Also link against libtorch_python to satisfy Python-binding symbols
-    # (e.g., torch::PyWarningHandler) required by torch/extension.h.
+    # libtorch_python (Linux/macOS) / torch_python.lib (Windows) provides
+    # Python-binding symbols like torch::PyWarningHandler.
     execute_process(
-        COMMAND "${Python_EXECUTABLE}" -c "import torch; from pathlib import Path; p=Path(torch.__file__).parent/'lib'; m=sorted(p.glob('libtorch_python*')); print(str(m[0]) if m else '')"
+        COMMAND "${Python_EXECUTABLE}" -c "import torch; from pathlib import Path; p=Path(torch.__file__).parent/'lib'; m=sorted([*p.glob('libtorch_python*'), *p.glob('torch_python*.lib'), *p.glob('torch_python*.so')]); print(str(m[0]) if m else '')"
         OUTPUT_VARIABLE TORCH_PYTHON_LIBRARY_PATH
         OUTPUT_STRIP_TRAILING_WHITESPACE
         ERROR_QUIET
@@ -179,7 +241,10 @@ if(BUILD_CXX_KERNELS)
         target_link_libraries(fastvideo_kernel_ops PRIVATE CUDA::cudart CUDA::cuda_driver)
     endif()
 
-    # We install it to fastvideo_kernel/_C so we can load it to register the ops
-    install(TARGETS fastvideo_kernel_ops LIBRARY DESTINATION fastvideo_kernel/_C)
+    # .so/.dylib land in LIBRARY; .pyd lands in RUNTIME on Windows.
+    install(TARGETS fastvideo_kernel_ops
+        LIBRARY DESTINATION fastvideo_kernel/_C
+        RUNTIME DESTINATION fastvideo_kernel/_C
+    )
 endif()
 

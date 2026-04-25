@@ -10,11 +10,12 @@ import faulthandler
 import logging
 import logging.handlers
 import multiprocessing as mp
-from multiprocessing.connection import Connection
+from multiprocessing.connection import Connection, _ConnectionBase
 from multiprocessing.queues import Queue
 import os
 import queue
 import signal
+import sys
 import time
 from collections.abc import Callable
 from multiprocessing.process import BaseProcess
@@ -417,7 +418,7 @@ class UnreadyWorkerProcHandle:
     proc: BaseProcess
     rank: int
     pipe: Connection
-    ready_pipe: Connection
+    ready_pipe: _ConnectionBase
 
 
 @dataclass
@@ -582,7 +583,8 @@ class WorkerMultiprocProc:
             traceback = get_exception_traceback()
             logger.error("Worker %d hit an exception: %s", rank, traceback)
             if parent_process:
-                parent_process.send_signal(signal.SIGQUIT)
+                # SIGQUIT is POSIX-only; fall back to SIGTERM on Windows.
+                parent_process.send_signal(getattr(signal, "SIGQUIT", signal.SIGTERM))
 
         finally:
             if ready_pipe is not None:
@@ -604,7 +606,8 @@ class WorkerMultiprocProc:
         while pipes:
             ready = mp.connection.wait(pipes.keys())
             for pipe in ready:
-                assert isinstance(pipe, Connection)
+                # _ConnectionBase covers both POSIX Connection and Windows PipeConnection.
+                assert isinstance(pipe, _ConnectionBase)
                 try:
                     # Wait until the WorkerProc is ready.
                     unready_proc_handle = pipes.pop(pipe)
@@ -687,6 +690,9 @@ class WorkerMultiprocProc:
                             logging_info = output_batch.logging_info
                         # result tensor shared by CUDA IPC to avoid serialization overhead
                         result = output_batch.output
+                        # Windows has no CUDA IPC; move to CPU before sending.
+                        if sys.platform == "win32" and result is not None and result.is_cuda:
+                            result = result.cpu()
                         extra = output_batch.extra or {}
                         extra["peak_memory_mb"] = (torch.cuda.max_memory_allocated() / (1024 * 1024))
                         self.pipe.send({

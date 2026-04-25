@@ -4,8 +4,29 @@ from typing import Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import triton
-import triton.language as tl
+
+# Module-level @triton.jit decorators run at import time, so a missing
+# triton (typical on Windows) would break `import fastvideo_kernel` even
+# for callers that never reach a Triton path. Install a stub that no-ops
+# the decorator and raises only when a Triton symbol is actually called.
+try:
+    import triton
+    import triton.language as tl
+except ImportError:  # pragma: no cover
+
+    class _TritonUnavailable:
+        _MESSAGE = "Triton is required for this code path but is not installed."
+
+        def jit(self, fn, **_kwargs):  # type: ignore[no-untyped-def]
+            return fn
+
+        def __getattr__(self, name: str):  # type: ignore[no-untyped-def]
+            def _raise(*_args, **_kwargs):
+                raise RuntimeError(self._MESSAGE)
+            return _raise
+
+    triton = _TritonUnavailable()  # type: ignore[assignment]
+    tl = _TritonUnavailable()  # type: ignore[assignment]
 
 # Try to load the C++ extension
 try:

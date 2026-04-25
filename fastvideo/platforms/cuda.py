@@ -183,8 +183,7 @@ class CudaPlatformBase(Platform):
 
                 return "fastvideo.attention.backends.sla.SLAAttentionBackend"
             except ImportError as e:
-                logger.error("Failed to import SLA Attention backend: %s", str(e))
-                raise ImportError("SLA Attention backend is not available. ") from e
+                logger.warning("SLA Attention backend unavailable (%s); falling back.", e)
         elif selected_backend == AttentionBackendEnum.SAGE_SLA_ATTN:
             try:
                 from fastvideo.attention.backends.sla import (  # noqa: F401
@@ -193,9 +192,7 @@ class CudaPlatformBase(Platform):
 
                 return "fastvideo.attention.backends.sla.SageSLAAttentionBackend"
             except ImportError as e:
-                logger.error("Failed to import SageSLA Attention backend: %s", str(e))
-                raise ImportError("SageSLA Attention backend requires spas_sage_attn. "
-                                  "Install with: pip install git+https://github.com/thu-ml/SpargeAttn.git") from e
+                logger.warning("SageSLA Attention backend unavailable (%s); falling back.", e)
         elif selected_backend == AttentionBackendEnum.TORCH_SDPA:
             logger.info("Using Torch SDPA backend.")
             return "fastvideo.attention.backends.sdpa.SDPABackend"
